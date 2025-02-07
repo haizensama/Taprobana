@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-# This is the final commit 
+# This is the final commit for proof
 
 Resources:
   VPC:
@@ -69,6 +69,36 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
+  # NAT Gateway for PublicSubnet1
+  ElasticIPForNAT1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIPForNAT1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: ecom-prod-nat-gateway-1
+
+  # NAT Gateway for PublicSubnet2
+  ElasticIPForNAT2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIPForNAT2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: ecom-prod-nat-gateway-2
+
   RouteTablePrivate:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -109,6 +139,7 @@ Resources:
           ToPort: -1
           CidrIp: 0.0.0.0/0
 
+  ## IAM ROLE & INSTANCE PROFILE ##
   IAMRoleForEC2:
     Type: AWS::IAM::Role
     Properties:
@@ -155,7 +186,8 @@ Resources:
       Port: 80
       TargetType: instance
       Targets:
-        - Id: !Ref EC2Instance
+        - Id: !Ref EC2Instance1
+        - Id: !Ref EC2Instance2
       HealthCheckPath: "/"
 
   ALB:
@@ -180,7 +212,7 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ALBTargetGroup
 
-  EC2Instance:
+  EC2Instance1:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: t2.micro
@@ -192,7 +224,21 @@ Resources:
       IamInstanceProfile: !Ref InstanceProfile
       Tags:
         - Key: Name
-          Value: ecom-prod-instance
+          Value: ecom-prod-instance-1
+
+  EC2Instance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      SubnetId: !Ref PrivateSubnet2
+      ImageId: ami-04b4f1a9cf54c11d0
+      KeyName: ecom
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        - Key: Name
+          Value: ecom-prod-instance-2
 
   DynamoDBTable:
     Type: AWS::DynamoDB::Table
@@ -217,39 +263,78 @@ Resources:
       RouteTableIds:
         - !Ref RouteTablePrivate
 
-  S3Bucket:
-    Type: AWS::S3::Bucket
+  ## FIXED LAUNCH TEMPLATE ##
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      BucketName: ecom-prod-s3-bucket
-      AccessControl: Private
-      VersioningConfiguration:
-        Status: Enabled
-      Tags:
-        - Key: Name
-          Value: ecom-prod-s3-bucket
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn  # There was an error here Maleesha
+        ImageId: ami-04b4f1a9cf54c11d0
+        InstanceType: t2.micro
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        KeyName: ecom
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: ecom-prod-instance
 
-  VPCS3Endpoint:
-    Type: AWS::EC2::VPCEndpoint
+  ## FIXED AUTO SCALING GROUP ##
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: LaunchTemplate  # Mali please check template again
     Properties:
-      VpcId: !Ref VPC
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
-      VpcEndpointType: Gateway
-      RouteTableIds:
-        - !Ref RouteTablePrivate
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal: "*"
-            Action:
-              - "s3:GetObject"
-              - "s3:PutObject"
-              - "s3:ListBucket"
-            Resource:
-              - !Sub "arn:aws:s3:::ecom-prod-s3-bucket"
-              - !Sub "arn:aws:s3:::ecom-prod-s3-bucket/*"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber  # I fixed the version issue
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 1
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
 
-  ## CLOUDWATCH MONITORING ##
+  # Scaling Policy - Scale Up
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      ScalingAdjustment: 1  # Increase the number of instances by 1
+      Cooldown: 300  # 5 minutes before next scaling action
+
+  # Scaling Policy - Scale Down
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      ScalingAdjustment: -1  # Decrease the number of instances by 1
+      Cooldown: 300  # Wait for 5 minutes before the next scaling action
+
+  # CloudWatch Alarm for Scale Up 
+  CloudWatchAlarmScaleUp:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Triggers scale-up when CPU utilization exceeds 75%"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      Statistic: Average
+      Period: 300  # Check every 5 minutes
+      EvaluationPeriods: 1
+      Threshold: 75
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+
+  # CLOUDWATCH MONITORING #
   CloudWatchAlarmEC2CPU:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -258,7 +343,7 @@ Resources:
       MetricName: CPUUtilization
       Dimensions:
         - Name: InstanceId
-          Value: !Ref EC2Instance
+          Value: !Ref EC2Instance1
       Statistic: Average
       Period: 300
       EvaluationPeriods: 1
@@ -268,6 +353,24 @@ Resources:
         - !Ref SNSTopic
       OKActions:
         - !Ref SNSTopic
+
+  # CloudWatch Alarm for Scale Down (when CPU utilization is below 30%)
+  CloudWatchAlarmScaleDown:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Triggers scale-down when CPU utilization is below 30%"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      Statistic: Average
+      Period: 300  # Check every 5 minutes
+      EvaluationPeriods: 1
+      Threshold: 30
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref ScaleDownPolicy
 
   CloudWatchAlarmALBRequests:
     Type: AWS::CloudWatch::Alarm
@@ -299,6 +402,40 @@ Resources:
       TopicArn: !Ref SNSTopic
       Protocol: email
       Endpoint: "22ug2-0190M@sltc.edu.lk"
+
+  ## S3 BUCKET ##
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: ecom-prod-s3-bucket
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: ecom-prod-s3-bucket
+
+  ## S3 VPC ENDPOINT ##
+  VPCS3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref RouteTablePrivate
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action:
+              - "s3:GetObject"
+              - "s3:PutObject"
+              - "s3:ListBucket"
+            Resource:
+              - !Sub "arn:aws:s3:::ecom-prod-s3-bucket"
+              - !Sub "arn:aws:s3:::ecom-prod-s3-bucket/*"
 
 Outputs:
   ALBURL:
