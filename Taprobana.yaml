@@ -44,7 +44,7 @@ Resources:
       Tags:
         - Key: Name
           Value: ecom-prod-private-subnet-1
-
+          
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
@@ -225,7 +225,7 @@ Resources:
       Tags:
         - Key: Name
           Value: ecom-prod-instance-1
-
+# Moderation complete- CICD successful 
   EC2Instance2:
     Type: AWS::EC2::Instance
     Properties:
