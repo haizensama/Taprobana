@@ -183,6 +183,7 @@ aws cloudformation deploy \
 
 Charith Hewage  
 Cloud and DevOps Architect 
+
 Malindi Ratnayake
 Cloud and DevOps Co-Architect
 
